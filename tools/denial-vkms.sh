@@ -11,9 +11,18 @@ PIDFILE="$HOME/.cache/denial-vkms.pid"
 BUNDLE="/usr/lib/denial/flutter"
 
 find_vkms_card() {
+  # 上游内核里 vkms 的驱动名是 faux_driver；也兼容 DRIVER=vkms。
+  # 更稳的判据：存在一个 connected 的 Virtual-* 输出。
+  for s in /sys/class/drm/card*-Virtual-*/status; do
+    [ -f "$s" ] || continue
+    [ "$(cat "$s" 2>/dev/null)" = "connected" ] || continue
+    card=$(basename "$(dirname "$s")" | cut -d- -f1)
+    echo "/dev/dri/$card"
+    return 0
+  done
   for ue in /sys/class/drm/card*/device/uevent; do
     [ -f "$ue" ] || continue
-    if grep -q '^DRIVER=vkms' "$ue" 2>/dev/null; then
+    if grep -qE '^DRIVER=(vkms|faux_driver)' "$ue" 2>/dev/null; then
       card=$(basename "$(dirname "$(dirname "$ue")")")
       echo "/dev/dri/$card"
       return 0
