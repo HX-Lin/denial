@@ -323,7 +323,7 @@ impl DamageRegion {
         }
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.len == 0
     }
 

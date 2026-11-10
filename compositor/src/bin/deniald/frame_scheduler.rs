@@ -83,6 +83,10 @@ pub(super) struct FrameScheduler {
     next_dirty_serial: u64,
     flutter_request_latched: bool,
     flutter_outputs_dirty: bool,
+    /// OPT(denial-fork): 连续多少帧 Flutter 报空 damage
+    empty_flutter_frames: u8,
+    /// OPT(denial-fork): 是否启用空闲帧抑制（默认关，用 DENIAL_IDLE_FRAME_SUPPRESSION=1 开）
+    idle_suppression_enabled: bool,
     flutter_tick: Option<FrameTick>,
     last_flutter_target: Option<Instant>,
     ticks_idle: bool,
@@ -164,6 +168,8 @@ impl FrameScheduler {
             next_dirty_serial: 0,
             flutter_request_latched: false,
             flutter_outputs_dirty: false,
+            idle_suppression_enabled: idle_frame_suppression_enabled(),
+            empty_flutter_frames: 0,
             flutter_tick: None,
             last_flutter_target: None,
             ticks_idle: false,
@@ -238,6 +244,16 @@ impl FrameScheduler {
             let output = self.outputs.timelines[index].source.output;
             let serial = self.allocate_dirty_serial();
             self.dirty_outputs.entry(output).or_default().serial = serial;
+        }
+    }
+
+    /// OPT(denial-fork): 记录刚发布的 Flutter 帧是否为空 damage。
+    /// 连续空帧说明 shell 只是空转请求帧，此时抑制"每 tick 全屏标脏"。
+    pub(super) fn observe_published_frame(&mut self, damage_empty: bool) {
+        if damage_empty {
+            self.empty_flutter_frames = self.empty_flutter_frames.saturating_add(1);
+        } else {
+            self.empty_flutter_frames = 0;
         }
     }
 
@@ -332,7 +348,10 @@ impl FrameScheduler {
                     .last_flutter_target
                     .is_none_or(|target| tick.presentation_target > target)
         });
-        if flutter_tick.is_some() && !self.flutter_outputs_dirty {
+        if flutter_tick.is_some()
+            && !self.flutter_outputs_dirty
+            && !(self.idle_suppression_enabled && self.empty_flutter_frames >= 2)
+        {
             self.mark_all_dirty();
             self.flutter_outputs_dirty = true;
         }
@@ -438,6 +457,13 @@ impl FrameScheduler {
 // Serial zero is reserved. Outstanding renders are bounded, so the usual
 // half-range wrapping comparison also handles the practically unreachable
 // u64 rollover without treating a newer texture as already presented.
+fn idle_frame_suppression_enabled() -> bool {
+    matches!(
+        std::env::var("DENIAL_IDLE_FRAME_SUPPRESSION").as_deref(),
+        Ok("1") | Ok("on") | Ok("true")
+    )
+}
+
 fn serial_at_or_before(candidate: u64, reference: u64) -> bool {
     reference.wrapping_sub(candidate) < (1_u64 << 63)
 }
@@ -837,6 +863,74 @@ mod tests {
         assert_eq!(scheduler.render_requests().len(), 1);
         assert_eq!(scheduler.render_requests()[0].tick.output, output);
         assert_eq!(scheduler.render_texture_ids().collect::<Vec<_>>(), [42]);
+    }
+
+    #[test]
+    fn idle_frame_suppression_skips_redraw_after_empty_flutter_frames() {
+        let now = Instant::now();
+        let output = OutputId(9);
+        let mut scheduler = idle_scheduler(now, output, Duration::from_millis(16));
+        scheduler.idle_suppression_enabled = true;
+
+        // 两帧空 damage 之后，Flutter 再请求帧也不应把全部输出标脏
+        scheduler.observe_published_frame(true);
+        scheduler.observe_published_frame(true);
+        let next = now + Duration::from_millis(16);
+        assert_eq!(
+            scheduler.step_with_output_readiness(
+                next,
+                PendingFrame {
+                    flutter_requested: true,
+                },
+                |_| (true, true),
+            ),
+            FrameAction::Skip
+        );
+    }
+
+    #[test]
+    fn idle_frame_suppression_is_off_by_default() {
+        let now = Instant::now();
+        let output = OutputId(9);
+        let mut scheduler = idle_scheduler(now, output, Duration::from_millis(16));
+        scheduler.idle_suppression_enabled = false;
+
+        scheduler.observe_published_frame(true);
+        scheduler.observe_published_frame(true);
+        let next = now + Duration::from_millis(16);
+        assert!(matches!(
+            scheduler.step_with_output_readiness(
+                next,
+                PendingFrame {
+                    flutter_requested: true,
+                },
+                |_| (true, true),
+            ),
+            FrameAction::Render { .. }
+        ));
+    }
+
+    #[test]
+    fn idle_frame_suppression_resets_on_real_damage() {
+        let now = Instant::now();
+        let output = OutputId(9);
+        let mut scheduler = idle_scheduler(now, output, Duration::from_millis(16));
+        scheduler.idle_suppression_enabled = true;
+
+        scheduler.observe_published_frame(true);
+        scheduler.observe_published_frame(true);
+        scheduler.observe_published_frame(false); // 真实变化
+        let next = now + Duration::from_millis(16);
+        assert!(matches!(
+            scheduler.step_with_output_readiness(
+                next,
+                PendingFrame {
+                    flutter_requested: true,
+                },
+                |_| (true, true),
+            ),
+            FrameAction::Render { .. }
+        ));
     }
 
     fn idle_scheduler(now: Instant, output: OutputId, interval: Duration) -> FrameScheduler {

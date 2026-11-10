@@ -231,6 +231,7 @@ impl Session<'_, '_> {
             };
             let output = ready.output_id;
             let dirty_serial = ready.request.dirty_serial;
+            frame_scheduler.observe_published_frame(ready.damage.is_empty());
             if let Some(watch) = scheduler.publish_ready(runtime, ready)? {
                 install_ready_fence_watch(event_loop, watch)?;
             }
