@@ -997,12 +997,7 @@ impl WaylandFrontend {
             .and_then(|record| record.layout_restore_geometry)
             .filter(|geometry| has_visible_size(*geometry))
             .unwrap_or_else(|| self.stacking_geometry_for_layout(window, geometry));
-        let Some(physical_output) = self
-            .output_for_geometry(restore)
-            .map(|output| output.id)
-            .or(self.ticker_output)
-            .or_else(|| self.outputs.first().map(|output| output.id))
-        else {
+        let Some(physical_output) = self.window_placement_output(restore) else {
             return false;
         };
         #[cfg(feature = "flutter")]
@@ -1138,11 +1133,7 @@ impl WaylandFrontend {
                 let root = self.window_root_surface(window)?;
                 let geometry = self.window_geometry_target(window);
                 let restore = self.stacking_geometry_for_layout(window, geometry);
-                let physical_output = self
-                    .output_for_geometry(restore)
-                    .map(|output| output.id)
-                    .or(self.ticker_output)
-                    .or_else(|| self.outputs.first().map(|output| output.id))?;
+                let physical_output = self.window_placement_output(restore)?;
                 let space = self.layout_space_for_window(window, physical_output);
                 let adopt_scrolling_maximize = self.should_adopt_scrolling_maximize(window);
                 Some((root.id(), space, restore, adopt_scrolling_maximize))
@@ -1566,6 +1557,28 @@ impl WaylandFrontend {
     #[cfg(not(feature = "flutter"))]
     fn active_workspace(&self, _output: OutputId) -> u8 {
         1
+    }
+
+
+    /// OPT(denial-fork): 窗口只落在允许的输出上。
+    ///
+    /// 场景：为了在显示器切到另一台机器时保住 DRM 输出，会挂一块 vkms/EDID 假负载。
+    /// 它在滚动布局里也是一块真实的摆放区域，新窗口会被排到那块看不见的屏幕上。
+    /// `DENIAL_WINDOW_OUTPUTS=DP-2` 把摆放限制到真实输出，假负载只负责保持输出存活。
+    fn window_placement_output(&self, geometry: Rectangle<i32, Logical>) -> Option<OutputId> {
+        let configured = denial_core::environment::var("DENIAL_WINDOW_OUTPUTS");
+        let allowed = |output: &&super::WaylandOutput| match configured.as_deref() {
+            Ok(list) if !list.trim().is_empty() => list
+                .split(',')
+                .any(|name| name.trim() == output.connector),
+            _ => true,
+        };
+        self.output_for_geometry(geometry)
+            .filter(allowed)
+            .map(|output| output.id)
+            .or_else(|| self.outputs.iter().filter(allowed).map(|o| o.id).next())
+            .or(self.ticker_output)
+            .or_else(|| self.outputs.first().map(|output| output.id))
     }
 
     fn layout_space_for_window(&self, window: &Window, physical_output: OutputId) -> LayoutSpace {
