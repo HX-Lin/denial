@@ -85,8 +85,10 @@ pub(super) struct FrameScheduler {
     flutter_outputs_dirty: bool,
     /// OPT(denial-fork): 连续多少帧 Flutter 报空 damage
     empty_flutter_frames: u8,
-    /// OPT(denial-fork): 是否启用空闲帧抑制（默认关，用 DENIAL_IDLE_FRAME_SUPPRESSION=1 开）
-    idle_suppression_enabled: bool,
+    /// OPT(denial-fork): 空闲时的 shell 帧率上限（None = 不限，保持原行为）
+    idle_throttle: Option<Duration>,
+    /// OPT(denial-fork): 上一次真正授权 Flutter 渲染的时间
+    last_flutter_render: Option<Instant>,
     flutter_tick: Option<FrameTick>,
     last_flutter_target: Option<Instant>,
     ticks_idle: bool,
@@ -168,7 +170,8 @@ impl FrameScheduler {
             next_dirty_serial: 0,
             flutter_request_latched: false,
             flutter_outputs_dirty: false,
-            idle_suppression_enabled: idle_frame_suppression_enabled(),
+            idle_throttle: idle_frame_throttle(),
+            last_flutter_render: None,
             empty_flutter_frames: 0,
             flutter_tick: None,
             last_flutter_target: None,
@@ -348,10 +351,13 @@ impl FrameScheduler {
                     .last_flutter_target
                     .is_none_or(|target| tick.presentation_target > target)
         });
-        if flutter_tick.is_some()
-            && !self.flutter_outputs_dirty
-            && !(self.idle_suppression_enabled && self.empty_flutter_frames >= 2)
-        {
+        let throttled = match (self.idle_throttle, self.last_flutter_render) {
+            (Some(interval), Some(last)) if self.empty_flutter_frames >= 2 => {
+                now.saturating_duration_since(last) < interval
+            }
+            _ => false,
+        };
+        if flutter_tick.is_some() && !self.flutter_outputs_dirty && !throttled {
             self.mark_all_dirty();
             self.flutter_outputs_dirty = true;
         }
@@ -403,6 +409,9 @@ impl FrameScheduler {
                     .iter()
                     .any(|request| request.tick.output == tick.output)
             });
+            if self.flutter_tick.is_some() {
+                self.last_flutter_render = Some(now);
+            }
             FrameAction::Render {
                 flutter_output: self.flutter_tick.map(|tick| tick.output),
             }
@@ -457,11 +466,11 @@ impl FrameScheduler {
 // Serial zero is reserved. Outstanding renders are bounded, so the usual
 // half-range wrapping comparison also handles the practically unreachable
 // u64 rollover without treating a newer texture as already presented.
-fn idle_frame_suppression_enabled() -> bool {
-    matches!(
-        std::env::var("DENIAL_IDLE_FRAME_SUPPRESSION").as_deref(),
-        Ok("1") | Ok("on") | Ok("true")
-    )
+/// OPT(denial-fork): 空闲时把 shell 帧率限制到 DENIAL_IDLE_FRAME_THROTTLE 指定的 fps。
+/// 未设置 = 保持上游行为。有真实 damage 时不受限制。
+fn idle_frame_throttle() -> Option<Duration> {
+    let fps: u64 = std::env::var("DENIAL_IDLE_FRAME_THROTTLE").ok()?.parse().ok()?;
+    (fps > 0 && fps < 1000).then(|| Duration::from_micros(1_000_000 / fps))
 }
 
 fn serial_at_or_before(candidate: u64, reference: u64) -> bool {
@@ -866,44 +875,31 @@ mod tests {
     }
 
     #[test]
-    fn idle_frame_suppression_skips_redraw_after_empty_flutter_frames() {
+    fn idle_throttle_limits_flutter_frames_when_nothing_changes() {
         let now = Instant::now();
         let output = OutputId(9);
-        let mut scheduler = idle_scheduler(now, output, Duration::from_millis(16));
-        scheduler.idle_suppression_enabled = true;
+        let mut scheduler = idle_scheduler(now, output, Duration::from_millis(5));
+        scheduler.idle_throttle = Some(Duration::from_millis(33));
 
-        // 两帧空 damage 之后，Flutter 再请求帧也不应把全部输出标脏
         scheduler.observe_published_frame(true);
         scheduler.observe_published_frame(true);
-        let next = now + Duration::from_millis(16);
+        scheduler.last_flutter_render = Some(now);
+
+        // 间隔不足 -> 跳过（省掉一次栅格化）
         assert_eq!(
             scheduler.step_with_output_readiness(
-                next,
-                PendingFrame {
-                    flutter_requested: true,
-                },
+                now + Duration::from_millis(10),
+                PendingFrame { flutter_requested: true },
                 |_| (true, true),
             ),
             FrameAction::Skip
         );
-    }
 
-    #[test]
-    fn idle_frame_suppression_is_off_by_default() {
-        let now = Instant::now();
-        let output = OutputId(9);
-        let mut scheduler = idle_scheduler(now, output, Duration::from_millis(16));
-        scheduler.idle_suppression_enabled = false;
-
-        scheduler.observe_published_frame(true);
-        scheduler.observe_published_frame(true);
-        let next = now + Duration::from_millis(16);
+        // 间隔够了 -> 正常出帧，界面不会冻结
         assert!(matches!(
             scheduler.step_with_output_readiness(
-                next,
-                PendingFrame {
-                    flutter_requested: true,
-                },
+                now + Duration::from_millis(40),
+                PendingFrame { flutter_requested: true },
                 |_| (true, true),
             ),
             FrameAction::Render { .. }
@@ -911,22 +907,40 @@ mod tests {
     }
 
     #[test]
-    fn idle_frame_suppression_resets_on_real_damage() {
+    fn idle_throttle_is_off_without_the_environment_switch() {
         let now = Instant::now();
         let output = OutputId(9);
-        let mut scheduler = idle_scheduler(now, output, Duration::from_millis(16));
-        scheduler.idle_suppression_enabled = true;
+        let mut scheduler = idle_scheduler(now, output, Duration::from_millis(5));
+        scheduler.idle_throttle = None;
 
         scheduler.observe_published_frame(true);
         scheduler.observe_published_frame(true);
-        scheduler.observe_published_frame(false); // 真实变化
-        let next = now + Duration::from_millis(16);
+        scheduler.last_flutter_render = Some(now);
+
         assert!(matches!(
             scheduler.step_with_output_readiness(
-                next,
-                PendingFrame {
-                    flutter_requested: true,
-                },
+                now + Duration::from_millis(5),
+                PendingFrame { flutter_requested: true },
+                |_| (true, true),
+            ),
+            FrameAction::Render { .. }
+        ));
+    }
+
+    #[test]
+    fn idle_throttle_does_not_apply_while_content_changes() {
+        let now = Instant::now();
+        let output = OutputId(9);
+        let mut scheduler = idle_scheduler(now, output, Duration::from_millis(5));
+        scheduler.idle_throttle = Some(Duration::from_millis(33));
+        scheduler.last_flutter_render = Some(now);
+
+        // 刚刚有过真实 damage -> 空帧计数为 0，不触发限流
+        scheduler.observe_published_frame(false);
+        assert!(matches!(
+            scheduler.step_with_output_readiness(
+                now + Duration::from_millis(5),
+                PendingFrame { flutter_requested: true },
                 |_| (true, true),
             ),
             FrameAction::Render { .. }
