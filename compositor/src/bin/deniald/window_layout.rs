@@ -1356,6 +1356,38 @@ where
         requested.clamp(minimum, upper.max(minimum))
     }
 
+    /// OPT(denial-fork): 主轴（纸带方向）的尺寸上界。
+    ///
+    /// 固定尺寸客户端（`min_size == max_size`，例如腾讯会议声明 377×669 且拒绝 resize）
+    /// 无法把纹理画成格子那么大，`BoxFit.fill` 就会把它拉伸变形。把格子钉成它要的
+    /// 尺寸，纹理与格子一致，拉伸消失；可缩放客户端没有上限，行为不变。
+    fn bounded_main_extent(
+        &self,
+        geometry: Rectangle<i32, Logical>,
+        axis: LayoutAxis,
+        requested: i32,
+        minimum_sizes: &[(WindowId, Size<i32, Logical>)],
+        maximum_sizes: &[(WindowId, Size<i32, Logical>)],
+    ) -> i32 {
+        if self.root.leaf_count() != 1 {
+            return requested;
+        }
+        let minimum = axis
+            .main_size(layout_minimum_size(minimum_sizes, &self.active))
+            .max(1);
+        let maximum = maximum_sizes
+            .iter()
+            .find(|(window, _)| window == &self.active)
+            .map_or(0, |(_, size)| axis.main_size(*size));
+        let available = axis.main_extent(geometry).max(1);
+        let upper = if maximum > 0 {
+            available.min(maximum)
+        } else {
+            available
+        };
+        requested.clamp(minimum, upper.max(minimum))
+    }
+
     /// The same rectangle feeds arrangement and both resize paths. Never apply
     /// lone sizing to a split tree: its shared boundaries still fill the column.
     fn geometry(
@@ -1381,6 +1413,15 @@ where
         match cross {
             LayoutAxis::Horizontal => geometry.size.w = extent,
             LayoutAxis::Vertical => geometry.size.h = extent,
+        }
+        // OPT(denial-fork): 固定尺寸客户端在纸带方向上同样不能拉伸。
+        let main = axis.main_extent(geometry);
+        let bounded = self.bounded_main_extent(geometry, axis, main, minimum_sizes, maximum_sizes);
+        if bounded != main {
+            match axis {
+                LayoutAxis::Horizontal => geometry.size.w = bounded,
+                LayoutAxis::Vertical => geometry.size.h = bounded,
+            }
         }
         geometry
     }
