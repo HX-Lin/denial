@@ -676,6 +676,7 @@ pub(super) struct WaylandFrontend {
     #[cfg(feature = "flutter")]
     keyboard_insets: insets::KeyboardInsets,
     input_method: InputMethodManager,
+    virtual_pointer: input::virtual_pointer::VirtualPointerSupport,
     outputs: Vec<WaylandOutput>,
     scrolling_layout_axes: BTreeMap<String, ScrollingLayoutAxis>,
     work_area: crate::options::WorkAreaOptions,

@@ -53,7 +53,7 @@ const XKB_KEYCODE_OFFSET: u32 = 8;
 const PASSWORD_PURPOSE: u32 = 8;
 const PIN_PURPOSE: u32 = 9;
 
-fn is_public_session_client(client: &Client) -> bool {
+pub(super) fn is_public_session_client(client: &Client) -> bool {
     // Connections accepted on Denial's public socket carry this state.
     // Compositor-owned clients such as Xwayland use separate client data.
     client.get_data::<DenialClientState>().is_some()

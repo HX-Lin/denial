@@ -80,6 +80,8 @@ pub(super) mod flutter_route;
 mod tablet;
 #[path = "input/wayland_route.rs"]
 mod wayland_route;
+#[path = "input/virtual_pointer.rs"]
+pub(super) mod virtual_pointer;
 
 #[cfg(feature = "flutter")]
 use flutter_route::process_flutter_input_event;
@@ -931,7 +933,7 @@ fn retired_key_consumes_transition(
 }
 
 #[cfg(feature = "flutter")]
-fn retired_pointer_button_consumes_transition(
+pub(super) fn retired_pointer_button_consumes_transition(
     retired: &mut HashSet<u32>,
     button: u32,
     state: ButtonState,
@@ -942,7 +944,7 @@ fn retired_pointer_button_consumes_transition(
     }
 }
 
-fn update_pressed_buttons(buttons: &mut HashSet<u32>, button: u32, state: ButtonState) {
+pub(super) fn update_pressed_buttons(buttons: &mut HashSet<u32>, button: u32, state: ButtonState) {
     match state {
         ButtonState::Pressed => {
             buttons.insert(button);

@@ -7,7 +7,7 @@ use super::flutter_route::{
 };
 use super::*;
 
-fn activate_surface_at(
+pub(super) fn activate_surface_at(
     state: &mut RuntimeState,
     position: Point<f64, Logical>,
     serial: smithay::utils::Serial,

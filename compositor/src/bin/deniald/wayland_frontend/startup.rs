@@ -69,6 +69,8 @@ impl WaylandFrontend {
         let screencopy = screencopy::ScreencopyManager::new(&display_handle);
         let text_input = TextInputManager::new(&display_handle);
         let input_method = InputMethodManager::new(&display_handle);
+        let virtual_pointer =
+            input::virtual_pointer::VirtualPointerSupport::new(&display_handle);
         let shm_state = ShmState::new::<RuntimeState>(&display_handle, vec![]);
         let dmabuf_state = DmabufState::new();
         // Syncobjs belong on a capable render device, which can be separate
@@ -527,6 +529,7 @@ impl WaylandFrontend {
             #[cfg(feature = "flutter")]
             keyboard_insets: Default::default(),
             input_method,
+            virtual_pointer,
             outputs,
             scrolling_layout_axes,
             work_area,
